@@ -1,5 +1,10 @@
 streamlit
 pandas
+numpy
 openpyxl
+pillow
+requests
 paho-mqtt
-Pillow
+joblib
+scikit-learn
+matplotlib
