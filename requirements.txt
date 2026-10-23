@@ -8,3 +8,4 @@ paho-mqtt
 joblib
 scikit-learn
 matplotlib
+tensorflow==2.21.0
