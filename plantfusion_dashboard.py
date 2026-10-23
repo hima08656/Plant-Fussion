@@ -8,8 +8,10 @@ from datetime import datetime
 from io import BytesIO, StringIO
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 import streamlit as st
+import tensorflow as tf
 import paho.mqtt.client as mqtt
 from openpyxl import Workbook, load_workbook
 from PIL import Image
@@ -23,6 +25,121 @@ MQTT_TOPIC = "plantfusion/hima08656/sensors"
 
 BASE_DIR = Path(__file__).resolve().parent
 EXCEL_FILE = BASE_DIR / "PlantFusion_Data.xlsx"
+
+
+# =========================================================
+# Leaf disease ML model configuration
+# Keep these two files beside this Python file:
+#   plantfusion_best.keras
+#   plantfusion_class_names.json
+# =========================================================
+MODEL_PATH = BASE_DIR / "plantfusion_best.keras"
+CLASS_NAMES_PATH = BASE_DIR / "plantfusion_class_names.json"
+
+
+@st.cache_resource
+def load_leaf_model():
+    """Load the trained 38-class leaf classifier once per app session."""
+    if not MODEL_PATH.exists():
+        raise FileNotFoundError(
+            f"Model file not found: {MODEL_PATH}. "
+            "Place plantfusion_best.keras beside plantfusion_dashboard.py."
+        )
+    return tf.keras.models.load_model(MODEL_PATH)
+
+
+@st.cache_data
+def load_leaf_class_names():
+    """Load class names corresponding to the model output indices."""
+    if not CLASS_NAMES_PATH.exists():
+        raise FileNotFoundError(
+            f"Class labels file not found: {CLASS_NAMES_PATH}. "
+            "Place plantfusion_class_names.json beside plantfusion_dashboard.py."
+        )
+    with open(CLASS_NAMES_PATH, "r", encoding="utf-8") as file:
+        names = json.load(file)
+    if not isinstance(names, list) or len(names) != 38:
+        raise ValueError(
+            "Expected plantfusion_class_names.json to contain 38 class names."
+        )
+    return names
+
+
+def predict_leaf_disease(image):
+    """
+    Predict crop/condition from a PIL image.
+
+    The trained model includes its own rescaling layer, so input pixels
+    must remain in the 0-255 range.
+    """
+    model = load_leaf_model()
+    class_names = load_leaf_class_names()
+
+    image = image.convert("RGB").resize((224, 224))
+    image_array = np.asarray(image, dtype=np.float32)
+    image_array = np.expand_dims(image_array, axis=0)
+
+    probabilities = model.predict(image_array, verbose=0)[0]
+    predicted_index = int(np.argmax(probabilities))
+    top_indices = np.argsort(probabilities)[-3:][::-1]
+
+    top_predictions = [
+        (class_names[int(index)], float(probabilities[index]))
+        for index in top_indices
+    ]
+
+    return (
+        class_names[predicted_index],
+        float(probabilities[predicted_index]),
+        top_predictions,
+    )
+
+
+def show_leaf_prediction(image, key_prefix):
+    """Render prediction results for a captured or uploaded leaf image."""
+    if st.button("🔬 Analyze Leaf with AI", key=f"{key_prefix}_analyze"):
+        try:
+            with st.spinner("Analyzing leaf image with PlantFusion AI..."):
+                predicted_class, confidence, top_predictions = (
+                    predict_leaf_disease(image)
+                )
+
+            crop_name, separator, condition = predicted_class.partition("___")
+            crop_name = crop_name.replace("_", " ").strip()
+            condition = condition.replace("_", " ").strip()
+
+            st.subheader("🌱 AI Prediction")
+            result_col1, result_col2 = st.columns(2)
+            result_col1.metric("Predicted crop", crop_name)
+            result_col2.metric("Predicted condition", condition)
+            st.metric("Model confidence", f"{confidence * 100:.2f}%")
+
+            st.markdown("**Top 3 predictions**")
+            for label, score in top_predictions:
+                readable_label = label.replace("___", " — ").replace("_", " ")
+                st.write(f"**{readable_label}** — {score * 100:.2f}%")
+                st.progress(max(0.0, min(1.0, score)))
+
+            if confidence < 0.70:
+                st.warning(
+                    "Confidence is below 70%. Try a clear close-up image "
+                    "of one leaf with good lighting. The result may be unreliable."
+                )
+
+            st.info(
+                "This is an AI prediction, not a confirmed agricultural diagnosis. "
+                "PlantVillage test accuracy was 93.47%, but performance on real-world "
+                "camera images can be lower. Consult an agricultural expert before "
+                "making treatment decisions."
+            )
+
+        except Exception as error:
+            st.error(f"Leaf prediction failed: {error}")
+            st.caption(
+                "Check that both model files are beside this script and that "
+                "TensorFlow is installed correctly."
+            )
+
 
 HEADERS = [
     "timestamp",
@@ -537,6 +654,11 @@ if camera_mode == "Real Camera":
             use_container_width=True
         )
 
+        show_leaf_prediction(
+            Image.open(BytesIO(photo.getvalue())).convert("RGB"),
+            "pf_real_camera",
+        )
+
         st.download_button(
             "⬇️ Download captured photo",
             data=photo.getvalue(),
@@ -626,6 +748,11 @@ else:
                 image,
                 caption=f"Uploaded: {uploaded_photo.name}",
                 use_container_width=True
+            )
+
+            show_leaf_prediction(
+                image,
+                "pf_uploaded_plant_photo",
             )
 
             st.download_button(
